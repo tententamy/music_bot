@@ -6,4 +6,4 @@ class Note
     public string Symbol = "♪";
 }
 
-record TrackInfo(string Title, string AudioUrl, string SourceUrl);
+record TrackInfo(string Title, string AudioUrl, string SourceUrl, string ThumbnailUrl = "");

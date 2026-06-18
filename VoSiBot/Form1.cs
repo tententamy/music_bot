@@ -81,7 +81,12 @@ public partial class Form1 : Form
     int playlistIdx = 0;
 
     // ── Sprite tùy chỉnh (null = vẽ GDI+) ───────────────
-    Bitmap? sprite;
+    Bitmap?      sprite;
+    SpriteSheet? spriteSheet;
+    long         spriteMs;   // thời gian animation (ms)
+
+    // ── Mini player ───────────────────────────────────────
+    MiniPlayer? miniPlayer;
 
     // ─────────────────────────────────────────────────────
     public Form1()
@@ -108,10 +113,12 @@ public partial class Form1 : Form
         MouseDoubleClick += OnDbl;
 
         var ctx = new ContextMenuStrip();
-        ctx.Items.Add("🖼 Load ảnh bot",       null, OnLoadSprite);
-        ctx.Items.Add("🎵 YouTube",            null, OnYouTube);
+        ctx.Items.Add("🖼 Load ảnh / sprite",       null, OnLoadSprite);
+        ctx.Items.Add("📁 Load thư mục PNG",       null, OnLoadFolder);
+        ctx.Items.Add("🎵 YouTube",              null, OnYouTube);
         ctx.Items.Add("➕ Thêm bài vào playlist", null, OnAddToPlaylist);
-        ctx.Items.Add("⏭ Bài tiếp",            null, (_, _) => NextTrack());
+        ctx.Items.Add("🎛 Mini Player",          null, (_, _) => ToggleMiniPlayer());
+        ctx.Items.Add("⏭ Bài tiếp",              null, (_, _) => NextTrack());
         ctx.Items.Add("🗑 Xóa playlist",        null, (_, _) => { StopAudio(); playlist.Clear(); playlistIdx = 0; Say("Đã xóa playlist"); });
         ctx.Items.Add(new ToolStripSeparator());
         ctx.Items.Add("Ẩn",               null, (_, _) => Hide());
@@ -133,24 +140,62 @@ public partial class Form1 : Form
         PushFrame();
     }
 
-    // ── Load sprite + xóa nền trắng/tròn ────────────────
+    // ── Load sprite / sprite sheet ────────────────────────
     void OnLoadSprite(object? s, EventArgs e)
     {
         using var dlg = new OpenFileDialog
         {
-            Title  = "Chọn ảnh PNG/JPG cho bot",
-            Filter = "Images|*.png;*.jpg;*.jpeg;*.bmp;*.gif"
+            Title  = "Chọn ảnh PNG hoặc Aseprite JSON",
+            Filter = "Aseprite JSON|*.json|PNG/Image|*.png;*.jpg;*.jpeg;*.bmp;*.gif|Tất cả|*.*"
         };
         if (dlg.ShowDialog() != DialogResult.OK) return;
+        string path = dlg.FileName;
         try
         {
-            sprite?.Dispose();
-            var raw = new Bitmap(dlg.FileName);
-            sprite  = RemoveBackground(raw);
-            raw.Dispose();
-            Say("Hình đẹp quá! ✨");
+            if (Path.GetExtension(path).Equals(".json", StringComparison.OrdinalIgnoreCase))
+            {
+                // Sprite sheet từ Aseprite
+                var ss = SpriteSheet.Load(path);
+                if (ss == null) { Say("❌ JSON không hợp lệ"); return; }
+                spriteSheet?.Dispose();
+                spriteSheet = ss;
+                sprite?.Dispose(); sprite = null;
+                spriteMs = 0;
+                Say("✨ Sprite sheet loaded!");
+            }
+            else
+            {
+                // Ảnh PNG đơn
+                spriteSheet?.Dispose(); spriteSheet = null;
+                sprite?.Dispose();
+                var raw = new Bitmap(path);
+                sprite  = RemoveBackground(raw);
+                raw.Dispose();
+                Say("Hình đẹp quá! ✨");
+            }
         }
-        catch (Exception ex) { Say("Lỗi load ảnh 😅"); }
+        catch { Say("Lỗi load ảnh 😅"); }
+    }
+
+    // ── Load PNG sequence từ thư mục ─────────────────────
+    void OnLoadFolder(object? s, EventArgs e)
+    {
+        using var dlg = new FolderBrowserDialog
+        {
+            Description         = "Chọn thư mục chứa PNG sequence\n(subfolder idle/, dance/... hoặc file idle_0.png...)",
+            UseDescriptionForTitle = true,
+            ShowNewFolderButton = false
+        };
+        if (dlg.ShowDialog() != DialogResult.OK) return;
+        Say("⏳ Đang load...");
+        var ss = SpriteSheet.LoadFromFolder(dlg.SelectedPath);
+        if (ss == null) { Say("❌ Không tìm được PNG trong thư mục"); return; }
+        spriteSheet?.Dispose();
+        spriteSheet = ss;
+        sprite?.Dispose(); sprite = null;
+        spriteMs = 0;
+        string tags = string.Join(", ", ss.TagNames);
+        Say($"✨ Loaded! Tags: {tags}");
     }
 
     // Xóa nền trắng + pixel ngoài vòng tròn
@@ -382,6 +427,15 @@ public partial class Form1 : Form
         string? localFile = null;
         try
         {
+            WaveStream? reader = null;
+
+            // Local file → phát thẳng, không cần yt-dlp
+            if (File.Exists(track.SourceUrl))
+            {
+                reader = new AudioFileReader(track.SourceUrl);
+            }
+            else
+            {
             // Tìm yt-dlp
             string? ytdlp = await FindYtDlpAsync();
             if (ytdlp == null) { Say("❌ Cần cài yt-dlp"); return; }
@@ -391,8 +445,6 @@ public partial class Form1 : Form
             Say("⏳ Đang lấy link nhạc...");
             string? audioUrl = await ExtractAudioUrlAsync(ytdlp, track.SourceUrl);
             if (mySession != audioSession) return;
-
-            WaveStream reader;
             if (audioUrl != null && !audioUrl.Contains(".m3u8"))
             {
                 try
@@ -427,7 +479,9 @@ public partial class Form1 : Form
                 }
                 reader = new AudioFileReader(localFile);
             }
+            } // end else (online track)
 
+            if (reader == null) { if (mySession == audioSession) Say("❌ Không tải được"); return; }
             var wo = new WaveOutEvent { DesiredLatency = 200 };
             wo.Init(reader);
             if (mySession != audioSession) { wo.Dispose(); reader.Dispose(); return; }
@@ -436,6 +490,7 @@ public partial class Form1 : Form
             waveOut     = wo;
             wo.Play();
             Say($"🎵 {track.Title}", 625);
+            miniPlayer?.UpdateTrack(track, true);
 
             wo.PlaybackStopped += (_, _) =>
             {
@@ -590,6 +645,7 @@ public partial class Form1 : Form
             audioPaused = false;
             state = "dance";
             Say("▶ Phát tiếp! 🕺");
+            miniPlayer?.UpdatePlayState(true);
         }
         else
         {
@@ -598,6 +654,7 @@ public partial class Form1 : Form
             state = "idle";
             waveOut.Pause();
             Say("⏸ Tạm dừng");
+            miniPlayer?.UpdatePlayState(false);
         }
     }
 
@@ -645,42 +702,50 @@ public partial class Form1 : Form
         var lblInput = new Label { Text = "Link YouTube / SoundCloud / Playlist:", AutoSize = true, Left = 10, Top = 243, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
         var txtInput = new TextBox
         {
-            Left = 10, Top = 260, Width = 470, Height = 26,
+            Left = 10, Top = 260, Width = 390, Height = 26,
             Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
             Font = new Font("Segoe UI", 10f)
         };
         try { txtInput.Text = Clipboard.GetText().Trim(); } catch { }
-        if (!IsYT(txtInput.Text)) txtInput.Clear();
+        if (!IsSupported(txtInput.Text)) txtInput.Clear();
+
+        var btnBrowse = new Button
+        {
+            Text = "🔍 Tìm nhạc",
+            Left = 408, Top = 259, Width = 74, Height = 28,
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+            Font = new Font("Segoe UI", 8.5f)
+        };
 
         // ── Buttons ──
         var btnAdd = new Button
         {
-            Text = "➕ Thêm",
-            Left = 10, Top = 296, Width = 90, Height = 32,
+            Text = "➕ Thêm link",
+            Left = 10, Top = 296, Width = 100, Height = 32,
             Anchor = AnchorStyles.Bottom | AnchorStyles.Left
         };
         var btnPlay = new Button
         {
             Text = "▶ Phát ngay",
-            Left = 108, Top = 296, Width = 100, Height = 32,
+            Left = 118, Top = 296, Width = 100, Height = 32,
             Anchor = AnchorStyles.Bottom | AnchorStyles.Left
         };
         var btnDel = new Button
         {
             Text = "🗑 Xóa bài",
-            Left = 216, Top = 296, Width = 90, Height = 32,
+            Left = 226, Top = 296, Width = 90, Height = 32,
             Anchor = AnchorStyles.Bottom | AnchorStyles.Left
         };
         var btnUp = new Button
         {
             Text = "▲",
-            Left = 314, Top = 296, Width = 44, Height = 32,
+            Left = 324, Top = 296, Width = 38, Height = 32,
             Anchor = AnchorStyles.Bottom | AnchorStyles.Left
         };
         var btnDown = new Button
         {
             Text = "▼",
-            Left = 362, Top = 296, Width = 44, Height = 32,
+            Left = 366, Top = 296, Width = 38, Height = 32,
             Anchor = AnchorStyles.Bottom | AnchorStyles.Left
         };
         var btnClose = new Button
@@ -688,6 +753,141 @@ public partial class Form1 : Form
             Text = "Đóng",
             Left = 414, Top = 296, Width = 68, Height = 32,
             Anchor = AnchorStyles.Bottom | AnchorStyles.Right
+        };
+
+        // Tìm nhạc YouTube
+        btnBrowse.Click += (_, _) => OpenYouTubeSearch(dlg, listBox);
+
+        void OpenYouTubeSearch(Form parent, ListBox lb)
+        {
+            var searchDlg = new Form
+            {
+                Text = "🔍 Tìm nhạc",
+                Width = 560, Height = 490,
+                StartPosition = FormStartPosition.CenterParent,
+                MinimizeBox = false, MaximizeBox = false
+            };
+            var cmbSource = new ComboBox
+            {
+                Left = 10, Top = 10, Width = 120, Height = 28,
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Font = new Font("Segoe UI", 10f)
+            };
+            cmbSource.Items.AddRange(new object[] { "▶ YouTube", "☁ SoundCloud" });
+            cmbSource.SelectedIndex = 0;
+            var txtSearch = new TextBox
+            {
+                Left = 138, Top = 10, Width = 300, Height = 28,
+                Font = new Font("Segoe UI", 11f),
+                PlaceholderText = "Tên bài hát, nghệ sĩ..."
+            };
+            var btnSearch = new Button { Text = "🔍 Tìm", Left = 446, Top = 9, Width = 90, Height = 30 };
+            var resultBox = new ListBox
+            {
+                Left = 10, Top = 48, Width = 526, Height = 310,
+                Font = new Font("Segoe UI", 10f),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom
+            };
+            var lblStatus = new Label { Left = 10, Top = 365, Width = 420, Height = 22, Text = "", ForeColor = Color.Gray };
+            var btnAdd2 = new Button { Text = "➕ Thêm vào playlist", Left = 10, Top = 390, Width = 160, Height = 32 };
+            var btnPlay2 = new Button { Text = "▶ Phát ngay", Left = 178, Top = 390, Width = 120, Height = 32 };
+            var btnClose2 = new Button { Text = "Đóng", Left = 456, Top = 390, Width = 80, Height = 32 };
+
+            var searchResults = new List<TrackInfo>();
+
+            async Task DoSearch()
+            {
+                string q = txtSearch.Text.Trim();
+                if (string.IsNullOrEmpty(q)) return;
+                lblStatus.Text = "⏳ Đang tìm...";
+                resultBox.Items.Clear();
+                searchResults.Clear();
+                btnSearch.Enabled = false;
+
+                string? ytdlp = await FindYtDlpAsync();
+                if (ytdlp == null) { lblStatus.Text = "❌ Cần yt-dlp"; btnSearch.Enabled = true; return; }
+
+                string prefix = cmbSource.SelectedIndex == 1 ? "scsearch15" : "ytsearch15";
+                var psi = new ProcessStartInfo(ytdlp,
+                    $"--flat-playlist --ignore-errors --print \"%(title)s|||%(webpage_url)s\" \"{prefix}:{q}\"")
+                {
+                    UseShellExecute = false, CreateNoWindow = true,
+                    RedirectStandardOutput = true, RedirectStandardError = true,
+                    StandardOutputEncoding = System.Text.Encoding.UTF8
+                };
+                using var proc = Process.Start(psi)!;
+                string raw = await proc.StandardOutput.ReadToEndAsync();
+                await proc.WaitForExitAsync();
+
+                foreach (var line in raw.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    int sep = line.IndexOf("|||");
+                    if (sep < 1) continue;
+                    string title = line[..sep].Trim();
+                    string url   = line[(sep + 3)..].Trim();
+                    if (!url.StartsWith("http")) continue;
+                    searchResults.Add(new TrackInfo(title, "", url));
+                    resultBox.Items.Add(title);
+                }
+                lblStatus.Text = searchResults.Count > 0 ? $"Tìm thấy {searchResults.Count} bài" : "Không tìm thấy bài nào";
+                btnSearch.Enabled = true;
+            }
+
+            btnSearch.Click += (_, _) => _ = DoSearch();
+            txtSearch.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; _ = DoSearch(); } };
+
+            void AddSelected(bool playNow)
+            {
+                int i = resultBox.SelectedIndex;
+                if (i < 0 || i >= searchResults.Count) return;
+                var track = searchResults[i];
+                playlist.Add(track);
+                RefreshList(lb);
+                Say($"✓ Thêm: {track.Title}");
+                if (playNow) { searchDlg.Close(); parent.Close(); _ = StartTrackAsync(playlist.Count - 1); }
+            }
+
+            btnAdd2.Click  += (_, _) => AddSelected(false);
+            btnPlay2.Click += (_, _) => AddSelected(true);
+            resultBox.DoubleClick += (_, _) => AddSelected(true);
+            btnClose2.Click += (_, _) => searchDlg.Close();
+
+            searchDlg.Controls.AddRange(new Control[] { cmbSource, txtSearch, btnSearch, resultBox, lblStatus, btnAdd2, btnPlay2, btnClose2 });
+            searchDlg.AcceptButton = btnSearch;
+            searchDlg.ShowDialog(parent);
+        }
+
+        // Chọn file nhạc từ máy
+        var btnFileLocal = new Button
+        {
+            Text = "📂 File",
+            Left = 408, Top = 230, Width = 74, Height = 26,
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+            Font = new Font("Segoe UI", 9f)
+        };
+        btnFileLocal.Click += (_, _) =>
+        {
+            using var ofd = new OpenFileDialog
+            {
+                Title     = "Chọn file nhạc",
+                Filter    = "Audio|*.mp3;*.m4a;*.wav;*.flac;*.ogg;*.aac;*.wma;*.opus|Tất cả|*.*",
+                Multiselect = true
+            };
+            if (ofd.ShowDialog() != DialogResult.OK) return;
+            int added = 0;
+            foreach (var f in ofd.FileNames)
+            {
+                string title = Path.GetFileNameWithoutExtension(f);
+                playlist.Add(new TrackInfo(title, f, f));
+                added++;
+            }
+            RefreshList(listBox);
+            Say($"✓ Thêm {added} file nhạc");
+            if (waveOut == null && playlist.Count > 0)
+            {
+                dlg.Close();
+                _ = StartTrackAsync(playlist.Count - added);
+            }
         };
 
         // Thêm link (load tracks từ URL)
@@ -762,7 +962,7 @@ public partial class Form1 : Form
         btnClose.Click += (_, _) => dlg.Close();
 
         dlg.Controls.AddRange(new Control[]
-            { listBox, lblInput, txtInput, btnAdd, btnPlay, btnDel, btnUp, btnDown, btnClose });
+            { listBox, lblInput, txtInput, btnBrowse, btnFileLocal, btnAdd, btnPlay, btnDel, btnUp, btnDown, btnClose });
 
         // Highlight bài đang phát
         if (playlist.Count > 0 && playlistIdx < playlist.Count)
@@ -790,10 +990,34 @@ public partial class Form1 : Form
         _ = StartTrackAsync((playlistIdx + 1) % playlist.Count);
     }
 
+    void PrevTrack()
+    {
+        if (playlist.Count == 0) return;
+        int prev = (playlistIdx - 1 + playlist.Count) % playlist.Count;
+        _ = StartTrackAsync(prev);
+    }
+
+    void ToggleMiniPlayer()
+    {
+        if (miniPlayer == null || miniPlayer.IsDisposed)
+        {
+            miniPlayer = new MiniPlayer();
+            miniPlayer.OnPrev      = PrevTrack;
+            miniPlayer.OnPlayPause = TogglePlayPause;
+            miniPlayer.OnNext      = NextTrack;
+            // Cập nhật state hiện tại
+            if (playlist.Count > 0 && playlistIdx < playlist.Count)
+                miniPlayer.UpdateTrack(playlist[playlistIdx], waveOut != null && !audioPaused);
+        }
+        if (miniPlayer.Visible) miniPlayer.Hide();
+        else                    miniPlayer.Show(this);
+    }
+
     // ── Game loop ─────────────────────────────────────────
     void GameTick()
     {
         frameT++;
+        spriteMs += 16; // timer interval ~16ms
         if (attackT > 0) { attackT--; if (attackT == 0 && state == "attack") state = (waveOut != null && !audioPaused) ? "dance" : "idle"; }
 
         if (state == "sing"  && frameT % 34 == 0)
@@ -865,7 +1089,15 @@ public partial class Form1 : Form
         float dB  = state == "dance" ? MathF.Sin(frameT * 0.19f) * 9f : 0f;
         float yo  = bob + dB;
 
-        // ── Sprite mode ──────────────────────────────────
+        // ── Sprite sheet mode (Aseprite) ─────────────────
+        if (spriteSheet != null)
+        {
+            DrawSpriteSheet(g, cx, cy, yo);
+            DrawOverlays(g, cx, cy, yo);
+            return;
+        }
+
+        // ── Sprite PNG đơn ────────────────────────────────
         if (sprite != null)
         {
             DrawSprite(g, cx, cy, yo);
@@ -874,144 +1106,233 @@ public partial class Form1 : Form
         }
 
         // ── GDI+ Pucca mode ──────────────────────────────
-        var cBk  = Color.FromArgb(22,  22,  22 );
-        var cRed = Color.FromArgb(218, 38,  58 );
-        var cRD  = Color.FromArgb(162, 22,  42 );
-        var cRL  = Color.FromArgb(255, 108, 128);
-        var cSk  = Color.FromArgb(255, 220, 195);
-        var cBlu = Color.FromArgb(165, 255, 135, 150);
-        var cGl  = Color.FromArgb(55,  255, 255, 255);
+        // Colors
+        var cHair = Color.FromArgb(15,  12,  18 );   // near-black hair
+        var cRed  = Color.FromArgb(196, 30,  50 );   // Pucca red
+        var cRDk  = Color.FromArgb(148, 18,  36 );   // red shadow
+        var cRLt  = Color.FromArgb(230, 80,  100);   // red highlight
+        var cSkin = Color.FromArgb(255, 212, 176);   // warm skin
+        var cSknD = Color.FromArgb(230, 180, 140);   // skin shadow
+        var cBlsh = Color.FromArgb(130, 255, 160, 170); // cheek blush
+        var cGlss = Color.FromArgb(60,  255, 255, 255); // gloss highlight
+        var cShad = Color.FromArgb(50,  0,   0,   0 );  // drop shadow
+        var cTeeth= Color.FromArgb(245, 245, 240);   // off-white teeth
+        var cWhite= Color.White;
 
-        using var bBk  = new SolidBrush(cBk);
-        using var bR   = new SolidBrush(cRed);
-        using var bRD  = new SolidBrush(cRD);
-        using var bRL  = new SolidBrush(cRL);
-        using var bSk  = new SolidBrush(cSk);
-        using var bBlu = new SolidBrush(cBlu);
-        using var bW   = new SolidBrush(Color.White);
-        using var bGl  = new SolidBrush(cGl);
+        using var bHair = new SolidBrush(cHair);
+        using var bRed  = new SolidBrush(cRed);
+        using var bRDk  = new SolidBrush(cRDk);
+        using var bRLt  = new SolidBrush(cRLt);
+        using var bSkin = new SolidBrush(cSkin);
+        using var bSknD = new SolidBrush(cSknD);
+        using var bBlsh = new SolidBrush(cBlsh);
+        using var bGlss = new SolidBrush(cGlss);
+        using var bShad = new SolidBrush(cShad);
+        using var bW    = new SolidBrush(cWhite);
+        using var bTeeth= new SolidBrush(cTeeth);
 
+        // Helper: fill circle
         void FC(float x, float y, float r, Brush b)
             => g.FillEllipse(b, x - r, y - r, r * 2, r * 2);
 
+        // Helper: fill ellipse with separate x/y radii
+        void FE(float x, float y, float rx, float ry, Brush b)
+            => g.FillEllipse(b, x - rx, y - ry, rx * 2, ry * 2);
+
+        // Helper: filled rounded rectangle (center x,y)
         void RR(float x, float y, float w, float h, float arc, Brush b)
         {
             arc = Math.Min(arc, Math.Min(w, h));
             using var p = new GraphicsPath();
-            p.AddArc(x-w/2,       y-h/2,       arc, arc, 180, 90);
-            p.AddArc(x+w/2-arc,   y-h/2,       arc, arc, 270, 90);
-            p.AddArc(x+w/2-arc,   y+h/2-arc,   arc, arc,   0, 90);
-            p.AddArc(x-w/2,       y+h/2-arc,   arc, arc,  90, 90);
+            p.AddArc(x - w/2,           y - h/2,           arc, arc, 180, 90);
+            p.AddArc(x + w/2 - arc,     y - h/2,           arc, arc, 270, 90);
+            p.AddArc(x + w/2 - arc,     y + h/2 - arc,     arc, arc,   0, 90);
+            p.AddArc(x - w/2,           y + h/2 - arc,     arc, arc,  90, 90);
             p.CloseFigure();
             g.FillPath(b, p);
         }
 
-        // Shadow
-        g.FillEllipse(new SolidBrush(Color.FromArgb(40, 0, 0, 0)),
-            cx - 34, cy + 74 + yo, 68, 11);
-
-        // Chân
-        float legSw = state == "dance" ? MathF.Sin(frameT * 0.22f) * 20f : 0f;
+        // ── Animation values ─────────────────────────────────
+        float legSw = state == "dance" ? MathF.Sin(frameT * 0.22f) * 22f : 0f;
+        float dArm  = state == "dance" ? MathF.Sin(frameT * 0.20f) * 32f : 0f;
+        float lA    = attackT > 0 && state == "attack" ? -72f : (-15f + dArm);
+        float rA    = attackT > 0 && state == "attack" ?  28f : ( 15f - dArm);
+        float eDB   = state == "dance" ? MathF.Sin(frameT * 0.22f) * 1.5f : 0f;
+        float sc    = 1f + (state == "dance" ? MathF.Sin(frameT * 0.19f) * 0.04f : 0f);
         GraphicsState gs;
 
+        // ── 1. Shadow ─────────────────────────────────────────
+        FE(cx, cy + 82f + yo, 30f, 4.5f, bShad);
+
+        // ── 2. Legs ───────────────────────────────────────────
+        // Left leg — pivot at (cx-15, cy+54+yo), swings backward
         gs = g.Save();
-        g.TranslateTransform(cx - 15, cy + 60 + yo);
+        g.TranslateTransform(cx - 15f, cy + 54f + yo);
         g.RotateTransform(-legSw);
-        RR(0, 12, 16, 26, 7, bBk); FC(0, 27, 10, bRD); FC(3, 25, 5, bRL);
+        RR(0f, 14f, 16f, 28f, 8f, bHair);      // leg column
+        // Left shoe
+        FE(0f, 28f, 11f, 9f, bRed);             // shoe body
+        FE(-4f, 25f, 5f, 3f, bRLt);             // shoe highlight
         g.Restore(gs);
 
+        // Right leg — swings forward opposite
         gs = g.Save();
-        g.TranslateTransform(cx + 15, cy + 60 + yo);
+        g.TranslateTransform(cx + 15f, cy + 54f + yo);
         g.RotateTransform(legSw);
-        RR(0, 12, 16, 26, 7, bBk); FC(0, 27, 10, bRD); FC(3, 25, 5, bRL);
+        RR(0f, 14f, 16f, 28f, 8f, bHair);
+        FE(0f, 28f, 11f, 9f, bRed);
+        FE(-4f, 25f, 5f, 3f, bRLt);
         g.Restore(gs);
 
-        // Thân
-        RR(cx, cy + 36 + yo, 56, 52, 22, bR);
-        RR(cx, cy + 36 + yo, 50, 44, 18, bRD);
-        g.FillEllipse(new SolidBrush(Color.FromArgb(35, 255, 180, 180)),
-            cx - 25, cy + 12 + yo, 50, 44);
-        FC(cx, cy + 13 + yo, 10, bW);
-        RR(cx, cy + 18 + yo, 20, 10, 5, bW);
-
-        // Tay
-        float dArm = state == "dance" ? MathF.Sin(frameT * 0.20f) * 32f : 0f;
-        float lA   = attackT > 0 && state == "attack" ? -72f : (-18f + dArm);
-        float rA   = attackT > 0 && state == "attack" ?  28f : ( 18f - dArm);
-
+        // ── 3. Body ───────────────────────────────────────────
+        // Slight squash-stretch scale
         gs = g.Save();
-        g.TranslateTransform(cx - 33, cy + 14 + yo);
+        g.TranslateTransform(cx, cy + 32f + yo);
+        g.ScaleTransform(sc, 2f - sc);          // squash on Y, stretch on X (chibi bounce)
+        RR(0f, 0f, 58f, 52f, 22f, bRed);        // main body
+        // body shading — darker bottom half
+        using (var bodyShd = new SolidBrush(Color.FromArgb(60, 0, 0, 0)))
+            g.FillEllipse(bodyShd, -25f, 8f, 50f, 28f);
+        // body highlight — lighter arc at top
+        using (var bodyHlt = new SolidBrush(Color.FromArgb(40, 255, 200, 200)))
+            g.FillEllipse(bodyHlt, -22f, -22f, 44f, 28f);
+        g.Restore(gs);
+
+        // ── 4. Collar ─────────────────────────────────────────
+        // White rounded collar visible above body neckline
+        RR(cx, cy + 8f + yo, 24f, 14f, 7f, bW);
+        // collar inner shadow
+        using (var cInner = new SolidBrush(Color.FromArgb(30, 0, 0, 0)))
+            RR(cx, cy + 9f + yo, 20f, 10f, 5f, cInner);
+
+        // ── 5. Arms ───────────────────────────────────────────
+        // Left arm — pivot at left shoulder
+        gs = g.Save();
+        g.TranslateTransform(cx - 33f, cy + 12f + yo);
         g.RotateTransform(lA);
-        RR(0, 12, 14, 26, 6, bRD); FC(0, 27, 8, bSk);
+        RR(0f, 13f, 14f, 26f, 7f, bSknD);      // arm shadow side
+        RR(-1f, 12f, 13f, 24f, 7f, bSkin);     // arm main
+        FC(0f, 27f, 8f, bSkin);                 // hand ball
+        FC(-3f, 24f, 3f, bGlss);               // hand gloss
         g.Restore(gs);
 
+        // Right arm
         gs = g.Save();
-        g.TranslateTransform(cx + 33, cy + 14 + yo);
+        g.TranslateTransform(cx + 33f, cy + 12f + yo);
         g.RotateTransform(rA);
-        RR(0, 12, 14, 26, 6, bRD); FC(0, 27, 8, bSk);
+        RR(0f, 13f, 14f, 26f, 7f, bSknD);
+        RR(1f, 12f, 13f, 24f, 7f, bSkin);
+        FC(0f, 27f, 8f, bSkin);
+        FC(3f, 24f, 3f, bGlss);
         g.Restore(gs);
 
-        // Cổ
-        RR(cx, cy + 2 + yo, 13, 12, 5, bSk);
+        // ── 6. Hair base circle ───────────────────────────────
+        // Large near-black circle — top & back of head
+        FC(cx, cy - 30f + yo, 44f, bHair);
 
-        // Đầu
-        FC(cx, cy - 28 + yo, 40, bBk);
-        FC(cx - 10, cy - 42 + yo, 14, bGl);
+        // ── 7. Face circle ────────────────────────────────────
+        // Slightly smaller, offset downward — hair frames the top/sides
+        FC(cx, cy - 24f + yo, 38f, bSkin);
+        // Subtle face shading — darker at chin and temples
+        using (var faceShd = new SolidBrush(Color.FromArgb(18, 120, 60, 0)))
+        {
+            FE(cx, cy - 14f + yo, 30f, 20f, faceShd);  // chin area
+        }
 
-        // Bun tóc
-        FC(cx - 27, cy - 61 + yo, 19, bBk);
-        FC(cx + 27, cy - 61 + yo, 19, bBk);
-        FC(cx - 33, cy - 67 + yo,  6, bGl);
-        FC(cx + 21, cy - 67 + yo,  6, bGl);
-
-        // Mắt
+        // ── 8. Eyes ───────────────────────────────────────────
         bool blink = frameT % 130 < 7;
-        float eH   = blink ? 2f : 12f;
-        float eDB  = state == "dance" ? MathF.Sin(frameT * 0.22f) * 1.5f : 0f;
-        float eY   = cy - 32 + yo + eDB;
+        float eY   = cy - 32f + yo + eDB;
 
-        g.FillEllipse(bW, cx - 21, eY - eH/2, 13, eH);
-        g.FillEllipse(bW, cx +  8, eY - eH/2, 13, eH);
-        if (!blink)
+        if (blink)
         {
-            FC(cx - 15.5f, eY + 1, 5f,   bBk);
-            FC(cx - 13.5f, eY - 1, 1.8f, bW);
-            FC(cx + 13.5f, eY + 1, 5f,   bBk);
-            FC(cx + 15.5f, eY - 1, 1.8f, bW);
-        }
-
-        // Má hồng
-        g.FillEllipse(bBlu, cx - 32, cy - 23 + yo, 16, 10);
-        g.FillEllipse(bBlu, cx + 16, cy - 23 + yo, 16, 10);
-
-        // Miệng
-        float mY = cy - 12 + yo;
-        if (state is "sing" or "dance")
-        {
-            using var mp = new GraphicsPath();
-            mp.AddArc(cx - 11, mY - 4, 22, 18, 0, 180);
-            g.FillPath(bRD, mp);
-            g.FillEllipse(bW, cx - 7, mY + 1, 14, 7);
-        }
-        else if (attackT > 0)
-        {
-            using var pen = new Pen(cRD, 2.5f)
+            // Closed eyes — thin horizontal curved lines
+            using var blinkPen = new Pen(cHair, 2.8f)
                 { StartCap = LineCap.Round, EndCap = LineCap.Round };
-            g.DrawLine(pen, cx - 9, mY + 3, cx + 9, mY + 3);
+            g.DrawLine(blinkPen, cx - 22f, eY, cx - 10f, eY + 1f);
+            g.DrawLine(blinkPen, cx + 10f, eY, cx + 22f, eY + 1f);
         }
         else
         {
-            FC(cx, mY, 5.5f, bR);
-            FC(cx, mY, 3.5f, bRD);
+            // Open eyes — almond/oval white shapes
+            // Left eye
+            using (var eyePath = new GraphicsPath())
+            {
+                eyePath.AddEllipse(cx - 23f, eY - 6f, 15f, 12f);
+                g.FillPath(bW, eyePath);
+            }
+            // Right eye
+            using (var eyePath = new GraphicsPath())
+            {
+                eyePath.AddEllipse(cx + 8f, eY - 6f, 15f, 12f);
+                g.FillPath(bW, eyePath);
+            }
+            // Left pupil — small dark circle, slightly lower-center
+            FC(cx - 15.5f, eY + 1.5f, 5f, bHair);
+            // Right pupil
+            FC(cx + 15.5f, eY + 1.5f, 5f, bHair);
+            // Eye gloss (tiny white dot upper-left of each pupil)
+            FC(cx - 17.5f, eY - 0.5f, 1.8f, bW);
+            FC(cx + 13.5f, eY - 0.5f, 1.8f, bW);
         }
 
-        // Anten
-        using var antP = new Pen(cBk, 2.5f) { EndCap = LineCap.Round };
-        g.DrawLine(antP, cx, cy - 68 + yo, cx, cy - 83 + yo);
-        FC(cx, cy - 86 + yo, 4.5f, bR);
-        FC(cx, cy - 86 + yo, 2.8f, bRL);
+        // ── 9. Cheek blush ────────────────────────────────────
+        FE(cx - 29f, cy - 20f + yo, 10f, 6f, bBlsh);
+        FE(cx + 29f, cy - 20f + yo, 10f, 6f, bBlsh);
+
+        // ── 10. Mouth ─────────────────────────────────────────
+        float mY = cy - 11f + yo;
+        if (state is "sing" or "dance")
+        {
+            // Open mouth — filled arc with teeth showing
+            using var mp = new GraphicsPath();
+            mp.AddArc(cx - 11f, mY - 3f, 22f, 16f, 0f, 180f);
+            g.FillPath(bHair, mp);   // dark mouth interior
+            // Teeth row
+            g.FillEllipse(bTeeth, cx - 8f, mY + 1f, 16f, 7f);
+        }
+        else if (attackT > 0 && state == "attack")
+        {
+            // Flat determined line
+            using var atkPen = new Pen(cHair, 2.5f)
+                { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            g.DrawLine(atkPen, cx - 9f, mY + 4f, cx + 9f, mY + 4f);
+        }
+        else
+        {
+            // Idle — tiny upward-curving smile arc
+            using var smilePen = new Pen(Color.FromArgb(180, 100, 60, 60), 2.2f)
+                { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            g.DrawArc(smilePen, cx - 8f, mY - 1f, 16f, 10f, 10f, 160f);
+        }
+
+        // ── 11. Hair buns ─────────────────────────────────────
+        // Left bun
+        FC(cx - 28f, cy - 68f + yo, 20f, bHair);
+        // Right bun
+        FC(cx + 28f, cy - 68f + yo, 20f, bHair);
+
+        // ── 12. Bun highlights ────────────────────────────────
+        // Small semi-transparent white ellipse on upper-left of each bun
+        FE(cx - 34f, cy - 76f + yo, 6f, 4.5f, bGlss);
+        FE(cx + 22f, cy - 76f + yo, 6f, 4.5f, bGlss);
 
         DrawOverlays(g, cx, cy, yo);
+    }
+
+    // ── Sprite sheet render (Aseprite) ────────────────────
+    void DrawSpriteSheet(Graphics g, float cx, float cy, float yo)
+    {
+        if (spriteSheet == null) return;
+        var tag = spriteSheet.GetTag(state) ?? spriteSheet.GetTag("idle");
+        if (tag == null) return;
+
+        int frameIdx = spriteSheet.GetFrameIndex(tag, spriteMs);
+
+        float dArm = state == "dance" ? MathF.Sin(frameT * 0.20f) * 0.15f : 0f;
+        float rot  = (state == "attack" && attackT > 0) ? -8f : dArm * 12f;
+        float sc   = 1f + (state == "dance" ? MathF.Sin(frameT * 0.19f) * 0.04f : 0f);
+
+        spriteSheet.DrawFrame(g, frameIdx, cx, cy + 10, yo, W - 20, H - 55, rot, sc);
     }
 
     // ── Sprite render ─────────────────────────────────────
