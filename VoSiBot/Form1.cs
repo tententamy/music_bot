@@ -530,19 +530,27 @@ public partial class Form1 : Form
     }
 
     // ── Lấy danh sách track từ URL (YouTube/SoundCloud/playlist) ──
+    /// Tạo ProcessStartInfo cho yt-dlp với UTF-8 encoding đúng trên Windows
+    static ProcessStartInfo MakeYtPsi(string exe, string args)
+    {
+        var p = new ProcessStartInfo(exe, args)
+        {
+            UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true, RedirectStandardError = true,
+            StandardOutputEncoding = System.Text.Encoding.UTF8
+        };
+        p.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+        p.EnvironmentVariables["PYTHONUTF8"]       = "1";
+        return p;
+    }
+
     // Dùng --flat-playlist để liệt kê nhanh từng track (chỉ lấy title + webpage_url)
     // AudioUrl để trống — sẽ extract lúc play
     static async Task<List<TrackInfo>> FetchTracksAsync(string ytdlp, string url)
     {
         // Không dùng --flat-playlist vì nó không fetch đủ metadata (title = NA)
         // --print %(webpage_url)s không cần --format nên không download audio, vẫn nhanh
-        var psi = new ProcessStartInfo(ytdlp,
-            $"--ignore-errors --print \"%(title)s|||%(webpage_url)s\" \"{url}\"")
-        {
-            UseShellExecute = false, CreateNoWindow = true,
-            RedirectStandardOutput = true, RedirectStandardError = true,
-            StandardOutputEncoding = System.Text.Encoding.UTF8
-        };
+        var psi = MakeYtPsi(ytdlp, $"--ignore-errors --print \"%(title)s|||%(webpage_url)s\" \"{url}\"");
         using var proc = Process.Start(psi)!;
         string raw = await proc.StandardOutput.ReadToEndAsync();
         await proc.WaitForExitAsync();
@@ -566,13 +574,7 @@ public partial class Form1 : Form
     {
         const string fmt = "bestaudio[protocol=https]/bestaudio[protocol=http]"
                          + "/bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio";
-        var psi = new ProcessStartInfo(ytdlp,
-            $"--print \"%(url)s\" --format \"{fmt}\" \"{webpageUrl}\"")
-        {
-            UseShellExecute = false, CreateNoWindow = true,
-            RedirectStandardOutput = true, RedirectStandardError = true,
-            StandardOutputEncoding = System.Text.Encoding.UTF8
-        };
+        var psi = MakeYtPsi(ytdlp, $"--print \"%(url)s\" --format \"{fmt}\" \"{webpageUrl}\"");
         using var proc = Process.Start(psi)!;
         string result = (await proc.StandardOutput.ReadToEndAsync()).Trim();
         await proc.WaitForExitAsync();
@@ -632,12 +634,7 @@ public partial class Form1 : Form
         try
         {
             // yt-dlp -x --audio-format mp3 -o <tmpFile> <sourceUrl>
-            var psi = new ProcessStartInfo(ytdlp,
-                $"-x --audio-format mp3 --no-playlist -o \"{tmpFile}\" \"{track.SourceUrl}\"")
-            {
-                UseShellExecute = false, CreateNoWindow = true,
-                RedirectStandardOutput = true, RedirectStandardError = true
-            };
+            var psi = MakeYtPsi(ytdlp, $"-x --audio-format mp3 --no-playlist -o \"{tmpFile}\" \"{track.SourceUrl}\"");
             using var proc = Process.Start(psi)!;
             await proc.WaitForExitAsync();
             return File.Exists(tmpFile) ? tmpFile : null;
@@ -776,7 +773,7 @@ public partial class Form1 : Form
             var searchDlg = new Form
             {
                 Text = "🔍 Tìm nhạc",
-                Width = 560, Height = 490,
+                Width = 660, Height = 510,
                 StartPosition = FormStartPosition.CenterParent,
                 MinimizeBox = false, MaximizeBox = false
             };
@@ -790,23 +787,101 @@ public partial class Form1 : Form
             cmbSource.SelectedIndex = 0;
             var txtSearch = new TextBox
             {
-                Left = 138, Top = 10, Width = 300, Height = 28,
+                Left = 138, Top = 10, Width = 376, Height = 28,
                 Font = new Font("Segoe UI", 11f),
                 PlaceholderText = "Tên bài hát, nghệ sĩ..."
             };
-            var btnSearch = new Button { Text = "🔍 Tìm", Left = 446, Top = 9, Width = 90, Height = 30 };
+            var btnSearch = new Button { Text = "🔍 Tìm", Left = 522, Top = 9, Width = 110, Height = 30 };
+
+            // ── Thumbnail panel bên phải ──────────────────────────
+            var thumbBox = new PictureBox
+            {
+                Left = 358, Top = 48, Width = 274, Height = 154,
+                SizeMode   = PictureBoxSizeMode.Zoom,
+                BackColor  = Color.FromArgb(30, 30, 30),
+                BorderStyle= BorderStyle.FixedSingle
+            };
+            var lblThumbTitle = new Label
+            {
+                Left = 358, Top = 206, Width = 274, Height = 56,
+                Font = new Font("Segoe UI", 9f),
+                ForeColor = Color.DimGray,
+                AutoEllipsis = true,
+                Text = ""
+            };
+
             var resultBox = new ListBox
             {
-                Left = 10, Top = 48, Width = 526, Height = 310,
-                Font = new Font("Segoe UI", 10f),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom
+                Left = 10, Top = 48, Width = 340, Height = 310,
+                Font = new Font("Segoe UI", 10f)
             };
-            var lblStatus = new Label { Left = 10, Top = 365, Width = 420, Height = 22, Text = "", ForeColor = Color.Gray };
-            var btnAdd2 = new Button { Text = "➕ Thêm vào playlist", Left = 10, Top = 390, Width = 160, Height = 32 };
-            var btnPlay2 = new Button { Text = "▶ Phát ngay", Left = 178, Top = 390, Width = 120, Height = 32 };
-            var btnClose2 = new Button { Text = "Đóng", Left = 456, Top = 390, Width = 80, Height = 32 };
+            var lblStatus = new Label { Left = 10, Top = 365, Width = 620, Height = 22, Text = "", ForeColor = Color.Gray };
+            var btnAdd2  = new Button { Text = "➕ Thêm vào playlist", Left = 10,  Top = 390, Width = 160, Height = 32 };
+            var btnPlay2 = new Button { Text = "▶ Phát ngay",         Left = 178, Top = 390, Width = 120, Height = 32 };
+            var btnClose2= new Button { Text = "Đóng",                Left = 556, Top = 390, Width = 80,  Height = 32 };
 
             var searchResults = new List<TrackInfo>();
+            var thumbHttp = new System.Net.Http.HttpClient();
+            int thumbSession = 0;
+            string? cachedYtdlp = null;
+
+            // ── Load thumbnail khi chọn bài ──────────────────────
+            resultBox.SelectedIndexChanged += (_, _) =>
+            {
+                int idx = resultBox.SelectedIndex;
+                if (idx < 0 || idx >= searchResults.Count) return;
+                var track = searchResults[idx];
+                lblThumbTitle.Text = track.Title;
+                thumbBox.Image = null;
+                thumbBox.BackColor = Color.FromArgb(30, 30, 30);
+
+                int session = ++thumbSession;
+
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        string thumbUrl = track.ThumbnailUrl;
+
+                        // SoundCloud: thumbnail chưa có → lazy-fetch bằng yt-dlp
+                        if (!thumbUrl.StartsWith("http") && track.SourceUrl.Contains("soundcloud"))
+                        {
+                            cachedYtdlp ??= await FindYtDlpAsync();
+                            if (cachedYtdlp != null)
+                            {
+                                var psi2 = MakeYtPsi(cachedYtdlp,
+                                    $"--no-playlist --print \"%(thumbnail)s\" \"{track.SourceUrl}\"");
+                                using var p2 = Process.Start(psi2)!;
+                                string t = (await p2.StandardOutput.ReadToEndAsync()).Trim();
+                                await p2.WaitForExitAsync();
+                                if (t.StartsWith("http"))
+                                {
+                                    thumbUrl = t;
+                                    // Cache lại cho lần sau
+                                    if (session == thumbSession && idx < searchResults.Count)
+                                        searchResults[idx] = searchResults[idx] with { ThumbnailUrl = thumbUrl };
+                                }
+                            }
+                        }
+
+                        if (!thumbUrl.StartsWith("http")) return;
+                        if (session != thumbSession || searchDlg.IsDisposed) return;
+
+                        var bytes = await thumbHttp.GetByteArrayAsync(thumbUrl);
+                        if (session != thumbSession || searchDlg.IsDisposed) return;
+                        using var ms = new MemoryStream(bytes);
+                        var bmp = new Bitmap(ms);
+                        searchDlg.BeginInvoke(() =>
+                        {
+                            if (session != thumbSession) { bmp.Dispose(); return; }
+                            thumbBox.Image?.Dispose();
+                            thumbBox.Image     = bmp;
+                            thumbBox.BackColor = Color.Black;
+                        });
+                    }
+                    catch { }
+                });
+            };
 
             async Task DoSearch()
             {
@@ -815,38 +890,47 @@ public partial class Form1 : Form
                 lblStatus.Text = "⏳ Đang tìm...";
                 resultBox.Items.Clear();
                 searchResults.Clear();
+                thumbBox.Image = null;
+                lblThumbTitle.Text = "";
                 btnSearch.Enabled = false;
 
                 string? ytdlp = await FindYtDlpAsync();
                 if (ytdlp == null) { lblStatus.Text = "❌ Cần yt-dlp"; btnSearch.Enabled = true; return; }
 
                 string prefix = cmbSource.SelectedIndex == 1 ? "scsearch15" : "ytsearch15";
-                var psi = new ProcessStartInfo(ytdlp,
-                    $"--flat-playlist --ignore-errors --print \"%(title)s|||%(webpage_url)s\" \"{prefix}:{q}\"")
-                {
-                    UseShellExecute = false, CreateNoWindow = true,
-                    RedirectStandardOutput = true, RedirectStandardError = true,
-                    StandardOutputEncoding = System.Text.Encoding.UTF8
-                };
+                var psi = MakeYtPsi(ytdlp,
+                    $"--flat-playlist --ignore-errors --print \"%(title)s|||%(webpage_url)s|||%(thumbnail)s\" \"{prefix}:{q}\"");
                 using var proc = Process.Start(psi)!;
                 string raw = await proc.StandardOutput.ReadToEndAsync();
                 await proc.WaitForExitAsync();
 
                 foreach (var line in raw.Split('\n', StringSplitOptions.RemoveEmptyEntries))
                 {
-                    int sep = line.IndexOf("|||");
-                    if (sep < 1) continue;
-                    string title = line[..sep].Trim();
-                    string url   = line[(sep + 3)..].Trim();
+                    var parts = line.Split("|||");
+                    if (parts.Length < 2) continue;
+                    string title = parts[0].Trim();
+                    string url   = parts[1].Trim();
+                    string thumb = parts.Length >= 3 ? parts[2].Trim() : "";
                     if (!url.StartsWith("http")) continue;
-                    searchResults.Add(new TrackInfo(title, "", url));
+                    // Thumbnail chỉ lưu nếu là URL hợp lệ
+                    if (!thumb.StartsWith("http")) thumb = "";
+                    // YouTube: tự dựng thumbnail từ video ID nếu chưa có
+                    if (thumb == "" && url.Contains("youtube"))
+                    {
+                        string? id = null;
+                        if (url.Contains("youtu.be/")) id = url.Split("youtu.be/")[1].Split('?')[0];
+                        else if (url.Contains("v=")) { int vi = url.IndexOf("v=")+2; int en = url.IndexOf('&',vi); id = en<0?url[vi..]:url[vi..en]; }
+                        if (id != null) thumb = $"https://img.youtube.com/vi/{id}/mqdefault.jpg";
+                    }
+                    // SoundCloud: thumbnail để trống → lazy-load khi user chọn bài
+                    searchResults.Add(new TrackInfo(title, "", url, thumb));
                     resultBox.Items.Add(title);
                 }
                 lblStatus.Text = searchResults.Count > 0 ? $"Tìm thấy {searchResults.Count} bài" : "Không tìm thấy bài nào";
                 btnSearch.Enabled = true;
             }
 
-            btnSearch.Click += (_, _) => _ = DoSearch();
+            btnSearch.Click   += (_, _) => _ = DoSearch();
             txtSearch.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; _ = DoSearch(); } };
 
             void AddSelected(bool playNow)
@@ -864,8 +948,13 @@ public partial class Form1 : Form
             btnPlay2.Click += (_, _) => AddSelected(true);
             resultBox.DoubleClick += (_, _) => AddSelected(true);
             btnClose2.Click += (_, _) => searchDlg.Close();
+            searchDlg.FormClosed += (_, _) => thumbHttp.Dispose();
 
-            searchDlg.Controls.AddRange(new Control[] { cmbSource, txtSearch, btnSearch, resultBox, lblStatus, btnAdd2, btnPlay2, btnClose2 });
+            searchDlg.Controls.AddRange(new Control[] {
+                cmbSource, txtSearch, btnSearch,
+                resultBox, thumbBox, lblThumbTitle,
+                lblStatus, btnAdd2, btnPlay2, btnClose2
+            });
             searchDlg.AcceptButton = btnSearch;
             searchDlg.ShowDialog(parent);
         }
