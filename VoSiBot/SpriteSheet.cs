@@ -331,6 +331,121 @@ class SpriteSheet : IDisposable
     /// <summary>Tên tất cả animation tags đã load — hiển thị để debug.</summary>
     public string[] TagNames => tags.Keys.ToArray();
 
+    /// <summary>Áp dụng hàm xử lý lên tất cả frame (chỉ dùng với PNG sequence mode).</summary>
+    public void ApplyToAllFrames(Func<Bitmap, Bitmap> fn)
+    {
+        if (seqFrames == null) return;
+        for (int i = 0; i < seqFrames.Length; i++)
+        {
+            var result = fn(seqFrames[i]);
+            seqFrames[i].Dispose();
+            seqFrames[i] = result;
+        }
+    }
+
+    // ── Static image processing helpers ───────────────────
+
+    /// <summary>Xóa nền (flood-fill từ 4 góc) + bo tròn.</summary>
+    public static Bitmap ProcessFrame(Bitmap src, bool removeBg, bool circularCrop)
+    {
+        // Đảm bảo format 32bpp ARGB
+        var bmp = new Bitmap(src.Width, src.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(bmp))
+            g.DrawImage(src, 0, 0, src.Width, src.Height);
+
+        if (removeBg) FloodFillBackground(bmp);
+        if (circularCrop) ApplyCircularMask(bmp);
+        return bmp;
+    }
+
+    static void FloodFillBackground(Bitmap bmp)
+    {
+        int w = bmp.Width, h = bmp.Height;
+        var data = bmp.LockBits(new Rectangle(0, 0, w, h),
+            System.Drawing.Imaging.ImageLockMode.ReadWrite,
+            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        int stride = data.Stride;
+        byte[] buf = new byte[stride * h];
+        System.Runtime.InteropServices.Marshal.Copy(data.Scan0, buf, 0, buf.Length);
+
+        // Lấy màu nền từ 4 góc (trung bình)
+        Color SampleCorner(int x, int y)
+        {
+            int i = y * stride + x * 4;
+            return Color.FromArgb(buf[i+3], buf[i+2], buf[i+1], buf[i]);
+        }
+        var corners = new[] {
+            SampleCorner(0,0), SampleCorner(w-1,0),
+            SampleCorner(0,h-1), SampleCorner(w-1,h-1)
+        };
+        int bgR = (int)corners.Average(c => c.R);
+        int bgG = (int)corners.Average(c => c.G);
+        int bgB = (int)corners.Average(c => c.B);
+
+        const int tolerance = 38;
+        bool IsBackground(int i) {
+            int r = buf[i+2], g = buf[i+1], b = buf[i];
+            return Math.Abs(r-bgR)+Math.Abs(g-bgG)+Math.Abs(b-bgB) < tolerance*3;
+        }
+
+        // BFS flood-fill từ 4 góc
+        bool[] visited = new bool[w * h];
+        var queue = new Queue<int>();
+        void Enqueue(int x, int y) {
+            if (x<0||x>=w||y<0||y>=h) return;
+            int idx = y*w+x;
+            if (visited[idx]) return;
+            int bi = y*stride+x*4;
+            if (buf[bi+3] < 10 || IsBackground(bi)) {
+                visited[idx] = true;
+                buf[bi+3] = 0;  // transparent
+                queue.Enqueue(idx);
+            }
+        }
+        foreach (var (ex,ey) in new[]{(0,0),(w-1,0),(0,h-1),(w-1,h-1)})
+            Enqueue(ex,ey);
+
+        while (queue.Count > 0) {
+            int idx = queue.Dequeue();
+            int px = idx % w, py = idx / w;
+            Enqueue(px-1,py); Enqueue(px+1,py);
+            Enqueue(px,py-1); Enqueue(px,py+1);
+        }
+
+        System.Runtime.InteropServices.Marshal.Copy(buf, 0, data.Scan0, buf.Length);
+        bmp.UnlockBits(data);
+    }
+
+    static void ApplyCircularMask(Bitmap bmp)
+    {
+        int w = bmp.Width, h = bmp.Height;
+        float cx = w / 2f, cy = h / 2f;
+        float r  = Math.Min(cx, cy) * 0.96f;
+
+        var data = bmp.LockBits(new Rectangle(0,0,w,h),
+            System.Drawing.Imaging.ImageLockMode.ReadWrite,
+            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        int stride = data.Stride;
+        byte[] buf = new byte[stride * h];
+        System.Runtime.InteropServices.Marshal.Copy(data.Scan0, buf, 0, buf.Length);
+
+        for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+        {
+            float dx = x - cx, dy = y - cy;
+            float dist = MathF.Sqrt(dx*dx + dy*dy);
+            if (dist > r)
+            {
+                int i = y * stride + x * 4;
+                // Feather edge 2px
+                float alpha = dist > r+2 ? 0f : 1f - (dist-r)/2f;
+                buf[i+3] = (byte)(buf[i+3] * alpha);
+            }
+        }
+        System.Runtime.InteropServices.Marshal.Copy(buf, 0, data.Scan0, buf.Length);
+        bmp.UnlockBits(data);
+    }
+
     public void Dispose()
     {
         sheet?.Dispose();

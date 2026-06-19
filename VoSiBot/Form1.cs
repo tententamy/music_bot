@@ -190,6 +190,19 @@ public partial class Form1 : Form
         Say("⏳ Đang load...");
         var ss = SpriteSheet.LoadFromFolder(dlg.SelectedPath);
         if (ss == null) { Say("❌ Không tìm được PNG trong thư mục"); return; }
+
+        // Hỏi người dùng có muốn xóa nền + bo tròn không
+        var answer = MessageBox.Show(
+            "✂️ Cắt nền và bo tròn hình?",
+            "VoSiBot",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+        if (answer == DialogResult.Yes)
+        {
+            Say("✂️ Đang xử lý hình...");
+            ss.ApplyToAllFrames(bmp => SpriteSheet.ProcessFrame(bmp, removeBg: true, circularCrop: true));
+        }
+
         spriteSheet?.Dispose();
         spriteSheet = ss;
         sprite?.Dispose(); sprite = null;
